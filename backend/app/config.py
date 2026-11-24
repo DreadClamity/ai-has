@@ -13,13 +13,17 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000"
 
     gemini_api_key: str = ""
-    gemini_chat_model: str = "gemini-3.5-flash-lite"
+    gemini_chat_model: str = "gemini-flash-lite-latest"
     gemini_embedding_model: str = "gemini-embedding-001"
 
     chroma_host: str = "localhost"
     chroma_port: int = 8001
     chroma_collection: str = "it_kb_sops"
     kb_dir: str = "/knowledge_base"
+    rag_min_vector: float = 0.72
+    rag_strong_vector: float = 0.85
+    rag_top_k: int = 4
+    chat_history_messages: int = 6
 
     @property
     def cors_origin_list(self) -> list[str]:
