@@ -4,12 +4,13 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.api.auth import router as auth_router
+from app.api.kb import router as kb_router
 from app.config import settings
 from app.database import get_db
 
 app = FastAPI(
     title="AI-HAS API",
-    version="0.2.0",
+    version="0.3.0",
     description="AI-Powered Enterprise Helpdesk & Workflow Automation System",
 )
 
@@ -22,6 +23,7 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
+app.include_router(kb_router)
 
 
 @app.get("/health", tags=["System"])

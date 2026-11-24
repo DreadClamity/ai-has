@@ -19,7 +19,7 @@ services:
       retries: 10
 
   chroma:
-    image: chromadb/chroma:0.5.5
+    image: chromadb/chroma:0.5.23
     container_name: aihas-chroma
     restart: unless-stopped
     environment:
@@ -44,6 +44,7 @@ services:
       - "${BACKEND_PORT}:8000"
     volumes:
       - ./backend:/app
+      - ./knowledge_base:/knowledge_base:ro
     depends_on:
       db:
         condition: service_healthy

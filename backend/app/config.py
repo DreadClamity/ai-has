@@ -12,13 +12,14 @@ class Settings(BaseSettings):
 
     cors_origins: str = "http://localhost:3000"
 
-    openai_api_key: str = ""
-    openai_chat_model: str = "gpt-4o-mini"
-    openai_embedding_model: str = "text-embedding-3-small"
+    gemini_api_key: str = ""
+    gemini_chat_model: str = "gemini-3.5-flash-lite"
+    gemini_embedding_model: str = "gemini-embedding-001"
 
     chroma_host: str = "localhost"
     chroma_port: int = 8001
     chroma_collection: str = "it_kb_sops"
+    kb_dir: str = "/knowledge_base"
 
     @property
     def cors_origin_list(self) -> list[str]:
