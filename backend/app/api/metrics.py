@@ -74,6 +74,7 @@ def dashboard(
         "total_conversations": total,
         "resolved_by_ai": conv["resolved_by_ai"],
         "escalated": conv["escalated"],
+        "no_outcome": total - conv["resolved_by_ai"] - conv["escalated"],
         "deflection_rate_pct": round(100.0 * conv["resolved_by_ai"] / total, 1) if total else None,
         "avg_latency_ms": latency["avg_ms"],
         "p95_latency_ms": latency["p95_ms"],

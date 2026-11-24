@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     webhook_secret: str = ""
     tool_confirm_minutes: int = 10
     reset_limit_per_day: int = 3
+    chat_rate_per_minute: int = 12
+    login_max_failures: int = 5
+    login_window_seconds: int = 600
     
     @property
     def cors_origin_list(self) -> list[str]:

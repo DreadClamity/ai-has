@@ -6,6 +6,8 @@ from typing import Dict, List, Optional
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app.rag.hybrid import RetrievedChunk, hybrid_retrieve
+from app.guardrails.injection import detect_injection
+from app.guardrails.output_check import check_output
 from app.rag.prompts import ALLOWED_INTENTS, SYSTEM_PROMPT, TOOL_RULES, USER_TEMPLATE
 from app.services.llm import invoke_with_tools, message_text
 from app.tools.registry import TOOL_DECLARATIONS, TOOLS
@@ -34,6 +36,11 @@ THANKS_REPLY = (
 FALLBACK_REPLY = (
     "I couldn't find a reliable answer to that in our IT knowledge base, so I "
     "don't want to guess. A human IT agent can help you with this."
+)
+
+INJECTION_REPLY = (
+    "I can't help with that request. I can only help with IT support questions such "
+    "as passwords, VPN, Wi-Fi, printers, MFA and software access."
 )
 
 TOOL_INTENTS = {
@@ -125,6 +132,22 @@ def _refusal(reason: str, intent: str, top_vector: float, keyword_hit: bool, ext
 
 def answer_question(question: str, history: List[Dict[str, str]]) -> PipelineResult:
     text_in = question.strip()
+
+    injection = detect_injection(text_in)
+    if injection.blocked:
+        return PipelineResult(
+            INJECTION_REPLY,
+            "blocked_injection",
+            False,
+            False,
+            events=[
+                {
+                    "event_type": "injection_blocked",
+                    "severity": "high",
+                    "details": {"score": injection.score, "matches": injection.matches},
+                }
+            ],
+        )
 
     if GREETING.match(text_in):
         return PipelineResult(GREETING_REPLY, "smalltalk", False, False)
@@ -241,6 +264,19 @@ def answer_question(question: str, history: List[Dict[str, str]]) -> PipelineRes
         )
         result.events[0]["severity"] = "medium"
         return finish(result)
+
+    verdict = check_output(answer, [c.text for c in chunks])
+    if not verdict.ok:
+        result = _refusal(
+            "output_blocked",
+            intent,
+            retrieval.top_vector,
+            retrieval.keyword_hit,
+            extra={"issues": verdict.issues},
+        )
+        result.events[0]["severity"] = "high" if "prompt_leak" in verdict.issues else "medium"
+        return finish(result)
+    answer = verdict.answer
 
     citations = []
     for n in cited_numbers:

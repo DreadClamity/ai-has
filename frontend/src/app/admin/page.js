@@ -105,6 +105,7 @@ export default function AdminPage() {
                 value={fmt(s.deflection_rate_pct, "%")}
                 hint="Share of conversations the user marked as resolved by the assistant"
               />
+              <Kpi label="No outcome yet" value={fmt(s.no_outcome)} hint="Conversations still open or left without the user confirming resolution" />
               <Kpi label="Avg latency" value={fmt(s.avg_latency_ms, " ms")} />
               <Kpi label="P95 latency" value={fmt(s.p95_latency_ms, " ms")} />
               <Kpi label="MTTR" value={fmt(s.mttr_minutes, " min")} hint="Mean time to resolution of tickets" />

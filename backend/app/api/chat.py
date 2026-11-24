@@ -23,6 +23,8 @@ from app.schemas.chat import (
     ToolResultOut,
 )
 from app.services.llm import LLMUnavailable
+from app.guardrails.pii import redact_pii
+from app.guardrails.ratelimit import chat_limiter
 from app.services.messages import add_message
 from app.tools.executor import (
     ToolOutcome,
@@ -87,9 +89,30 @@ def send_message(
     user: dict = Depends(get_current_user),
 ):
     started = time.perf_counter()
-    message_text_in = payload.message.strip()
-    if not message_text_in:
+    original_text = payload.message.strip()
+    if not original_text:
         raise HTTPException(status_code=422, detail="Message cannot be empty")
+
+    allowed, retry_after = chat_limiter.allow(user["id"])
+    if not allowed:
+        db.execute(
+            text(
+                """
+                INSERT INTO guardrail_events (event_type, severity, details)
+                VALUES ('rate_limited', 'medium', CAST(:details AS jsonb))
+                """
+            ),
+            {"details": json.dumps({"user_id": user["id"], "retry_after": retry_after})},
+        )
+        db.commit()
+        raise HTTPException(
+            status_code=429,
+            detail="You are sending messages too quickly. Please wait a moment and try again.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    redaction = redact_pii(original_text)
+    message_text_in = redaction.text
 
     if payload.conversation_id:
         conversation = _get_owned_conversation(db, payload.conversation_id, user["id"])
@@ -106,6 +129,26 @@ def send_message(
         ).scalar_one()
 
     user_message_id = add_message(db, conversation_id, "user", message_text_in)
+    if redaction.found:
+        db.execute(
+            text("UPDATE messages SET pii_detected = TRUE WHERE id = CAST(:mid AS uuid)"),
+            {"mid": user_message_id},
+        )
+        db.execute(
+            text(
+                """
+                INSERT INTO guardrail_events
+                    (conversation_id, message_id, event_type, severity, details)
+                VALUES (CAST(:cid AS uuid), CAST(:mid AS uuid), 'pii_redacted', 'low',
+                        CAST(:details AS jsonb))
+                """
+            ),
+            {
+                "cid": conversation_id,
+                "mid": user_message_id,
+                "details": json.dumps(redaction.findings),
+            },
+        )
     db.commit()
 
     answer, intent = "", "general_howto"

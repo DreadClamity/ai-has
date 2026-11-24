@@ -10,6 +10,7 @@ from app.core.rbac import get_current_user, require_roles
 from app.database import get_db
 from app.schemas.agent import ResolveRequest, TextRequest, TicketDetailOut, TicketOut
 from app.services.automation import emit_event
+from app.guardrails.pii import redact_pii
 from app.services.messages import add_message
 
 router = APIRouter(prefix="/agent", tags=["Agent Dashboard"])
@@ -281,6 +282,12 @@ def message_to_agent(
     if row["status"] != "escalated":
         raise HTTPException(status_code=409, detail="This conversation is not with a human agent")
 
-    message_id = add_message(db, row["id"], "user", payload.content.strip())
+    redaction = redact_pii(payload.content.strip())
+    message_id = add_message(db, row["id"], "user", redaction.text)
+    if redaction.found:
+        db.execute(
+            text("UPDATE messages SET pii_detected = TRUE WHERE id = CAST(:mid AS uuid)"),
+            {"mid": message_id},
+        )
     db.commit()
     return {"message_id": message_id}
