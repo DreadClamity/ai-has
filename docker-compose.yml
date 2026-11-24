@@ -52,10 +52,26 @@ services:
         condition: service_healthy
       chroma:
         condition: service_started
-        
+
   mock-jira:
     build: ./automation/mock_jira
     container_name: aihas-mock-jira
     restart: unless-stopped
     ports:
       - "8010:8010"
+      
+  frontend:
+    build: ./frontend
+    container_name: aihas-frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      WATCHPACK_POLLING: "true"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - backend
