@@ -33,3 +33,14 @@ USER_TEMPLATE = """<context>
 <user_question>
 {question}
 </user_question>"""
+
+TOOL_RULES = """TOOLS
+You can call tools to take actions for the signed-in user. Rules:
+1. Call a tool ONLY when the user explicitly asks for that action, or says the documented steps did not work. Never call a tool just because it is related to the topic.
+2. If the question can be answered from <context>, answer it in the JSON format and do not call a tool.
+3. reset_password: only when the user asks you to reset or unlock their own account.
+4. create_ticket: only when the user wants a ticket logged, or reports a problem that no source in <context> covers and asks IT for help. Write a clear title and a description using only facts the user gave. Do not invent details.
+5. escalate_to_agent: when the user asks for a human, or the source says to escalate.
+6. get_ticket_status: when the user asks about a ticket they raised.
+7. If a required detail is missing, call no tool. Instead reply in the JSON format with "clarify": true, "answerable": true and a short question in "answer".
+8. When you call a tool, do not write any JSON answer."""

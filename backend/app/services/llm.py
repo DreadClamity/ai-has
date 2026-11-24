@@ -35,8 +35,8 @@ def message_text(content) -> str:
     return "".join(parts)
 
 
-def invoke_with_retry(messages, attempts: int = 2, delay: float = 3.0):
-    llm = get_llm()
+def invoke_with_tools(messages, tool_declarations, attempts: int = 2, delay: float = 3.0):
+    llm = get_llm().bind_tools(tool_declarations)
     last_error = None
     for attempt in range(attempts):
         try:

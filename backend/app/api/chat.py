@@ -1,4 +1,5 @@
 import json
+import re
 import time
 import uuid
 from typing import List
@@ -18,10 +19,28 @@ from app.schemas.chat import (
     ConversationOut,
     FeedbackRequest,
     MessageOut,
+    PendingAction,
+    ToolResultOut,
 )
 from app.services.llm import LLMUnavailable
+from app.services.messages import add_message
+from app.tools.executor import (
+    ToolOutcome,
+    attach_message,
+    confirm_tool_call,
+    deny_tool_call,
+    find_pending_tool_call,
+    propose_tool_call,
+)
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
+
+YES = re.compile(
+    r"^(yes|y|yep|yeah|sure|ok|okay|confirm|go ahead|please do|do it)[\s!.]*$", re.IGNORECASE
+)
+NO = re.compile(
+    r"^(no|n|nope|cancel|stop|don't|do not|never mind|nevermind)[\s!.]*$", re.IGNORECASE
+)
 
 
 def _valid_uuid(value: str) -> str:
@@ -47,6 +66,20 @@ def _get_owned_conversation(db: Session, conversation_id: str, user_id: str) -> 
     return dict(row)
 
 
+def _inactive_detail(status: str) -> str:
+    if status == "escalated":
+        return "This conversation was escalated to a human IT agent, who will contact you here."
+    return "This conversation is no longer active. Please start a new one."
+
+
+def _result_out(outcome: ToolOutcome) -> ToolResultOut:
+    return ToolResultOut(
+        tool_call_id=outcome.tool_call_id,
+        tool_name=outcome.tool_name,
+        status=outcome.status,
+    )
+
+
 @router.post("/message", response_model=ChatResponse)
 def send_message(
     payload: ChatRequest,
@@ -61,10 +94,7 @@ def send_message(
     if payload.conversation_id:
         conversation = _get_owned_conversation(db, payload.conversation_id, user["id"])
         if conversation["status"] != "active":
-            raise HTTPException(
-                status_code=409,
-                detail="This conversation is no longer active. Please start a new one.",
-            )
+            raise HTTPException(status_code=409, detail=_inactive_detail(conversation["status"]))
         conversation_id = conversation["id"]
     else:
         conversation_id = db.execute(
@@ -75,69 +105,93 @@ def send_message(
             {"uid": user["id"]},
         ).scalar_one()
 
-    user_message_id = db.execute(
-        text(
-            """
-            INSERT INTO messages (conversation_id, role, content)
-            VALUES (CAST(:cid AS uuid), CAST('user' AS message_role), :content)
-            RETURNING id::text
-            """
-        ),
-        {"cid": conversation_id, "content": message_text_in},
-    ).scalar_one()
+    user_message_id = add_message(db, conversation_id, "user", message_text_in)
     db.commit()
 
-    history_rows = db.execute(
-        text(
-            """
-            SELECT role::text AS role, content
-            FROM messages
-            WHERE conversation_id = CAST(:cid AS uuid)
-              AND id <> CAST(:mid AS uuid)
-              AND role IN ('user', 'assistant')
-            ORDER BY created_at DESC
-            LIMIT :n
-            """
-        ),
-        {"cid": conversation_id, "mid": user_message_id, "n": settings.chat_history_messages},
-    ).mappings().all()
-    history = [dict(r) for r in reversed(history_rows)]
+    answer, intent = "", "general_howto"
+    grounded, suggest_escalation = False, False
+    citations, events = [], []
+    prompt_tokens = completion_tokens = None
+    tool_call_id = None
+    pending_action = None
+    action_result = None
 
-    try:
-        result = answer_question(message_text_in, history)
-    except LLMUnavailable:
-        raise HTTPException(
-            status_code=503,
-            detail="The AI service is busy right now. Please try again in a moment or ask for a human agent.",
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+    pending = find_pending_tool_call(db, conversation_id)
+
+    if pending and YES.match(message_text_in):
+        outcome = confirm_tool_call(db, user, pending["id"])
+        answer, intent, tool_call_id = outcome.message, "tool_action", outcome.tool_call_id
+        action_result = _result_out(outcome)
+
+    elif pending and NO.match(message_text_in):
+        outcome = deny_tool_call(db, user, pending["id"])
+        answer, intent, tool_call_id = outcome.message, "tool_action", outcome.tool_call_id
+        action_result = _result_out(outcome)
+
+    else:
+        history_rows = db.execute(
+            text(
+                """
+                SELECT role::text AS role, content
+                FROM messages
+                WHERE conversation_id = CAST(:cid AS uuid)
+                  AND id <> CAST(:mid AS uuid)
+                  AND role IN ('user', 'assistant')
+                ORDER BY created_at DESC
+                LIMIT :n
+                """
+            ),
+            {
+                "cid": conversation_id,
+                "mid": user_message_id,
+                "n": settings.chat_history_messages,
+            },
+        ).mappings().all()
+        history = [dict(r) for r in reversed(history_rows)]
+
+        try:
+            result = answer_question(message_text_in, history)
+        except LLMUnavailable:
+            raise HTTPException(
+                status_code=503,
+                detail="The AI service is busy right now. Please try again in a moment or ask for a human agent.",
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
+        answer, intent = result.answer, result.intent
+        grounded, suggest_escalation = result.grounded, result.suggest_escalation
+        citations, events = result.citations, result.events
+        prompt_tokens, completion_tokens = result.prompt_tokens, result.completion_tokens
+
+        if result.tool_request:
+            outcome = propose_tool_call(
+                db,
+                user,
+                conversation_id,
+                result.tool_request["name"],
+                result.tool_request["args"],
+                user_initiated=result.tool_request.get("user_initiated", False),
+            )
+            answer = outcome.message
+            tool_call_id = outcome.tool_call_id
+            suggest_escalation = False
+            if outcome.status == "pending_confirmation":
+                pending_action = PendingAction(
+                    tool_call_id=outcome.tool_call_id,
+                    tool_name=outcome.tool_name,
+                    summary=outcome.message,
+                )
+            else:
+                action_result = _result_out(outcome)
 
     latency_ms = int((time.perf_counter() - started) * 1000)
+    assistant_message_id = add_message(
+        db, conversation_id, "assistant", answer, intent,
+        latency_ms, prompt_tokens, completion_tokens,
+    )
 
-    assistant_message_id = db.execute(
-        text(
-            """
-            INSERT INTO messages
-                (conversation_id, role, content, intent, latency_ms,
-                 prompt_tokens, completion_tokens)
-            VALUES
-                (CAST(:cid AS uuid), CAST('assistant' AS message_role), :content,
-                 :intent, :latency, :pt, :ct)
-            RETURNING id::text
-            """
-        ),
-        {
-            "cid": conversation_id,
-            "content": result.answer,
-            "intent": result.intent,
-            "latency": latency_ms,
-            "pt": result.prompt_tokens,
-            "ct": result.completion_tokens,
-        },
-    ).scalar_one()
-
-    for citation in result.citations:
+    for citation in citations:
         db.execute(
             text(
                 """
@@ -158,7 +212,7 @@ def send_message(
             },
         )
 
-    for event in result.events:
+    for event in events:
         db.execute(
             text(
                 """
@@ -178,15 +232,23 @@ def send_message(
             },
         )
 
+    if tool_call_id:
+        attach_message(db, tool_call_id, assistant_message_id)
+
     db.commit()
+
+    conversation_status = db.execute(
+        text("SELECT status::text FROM conversations WHERE id = CAST(:cid AS uuid)"),
+        {"cid": conversation_id},
+    ).scalar_one()
 
     return ChatResponse(
         conversation_id=conversation_id,
         message_id=assistant_message_id,
-        answer=result.answer,
-        intent=result.intent,
-        grounded=result.grounded,
-        suggest_escalation=result.suggest_escalation,
+        answer=answer,
+        intent=intent,
+        grounded=grounded,
+        suggest_escalation=suggest_escalation,
         citations=[
             CitationOut(
                 index=c.index,
@@ -197,9 +259,12 @@ def send_message(
                 relevance=c.relevance,
                 snippet=c.snippet,
             )
-            for c in result.citations
+            for c in citations
         ],
         latency_ms=latency_ms,
+        conversation_status=conversation_status,
+        pending_action=pending_action,
+        action_result=action_result,
     )
 
 

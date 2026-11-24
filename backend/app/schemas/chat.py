@@ -19,6 +19,18 @@ class CitationOut(BaseModel):
     snippet: str
 
 
+class PendingAction(BaseModel):
+    tool_call_id: str
+    tool_name: str
+    summary: str
+
+
+class ToolResultOut(BaseModel):
+    tool_call_id: str
+    tool_name: str
+    status: str
+
+
 class ChatResponse(BaseModel):
     conversation_id: str
     message_id: str
@@ -28,6 +40,20 @@ class ChatResponse(BaseModel):
     suggest_escalation: bool
     citations: List[CitationOut]
     latency_ms: int
+    conversation_status: str = "active"
+    pending_action: Optional[PendingAction] = None
+    action_result: Optional[ToolResultOut] = None
+
+
+class EscalateRequest(BaseModel):
+    reason: str = Field(default="User requested a human agent", min_length=3, max_length=500)
+
+
+class ToolActionResponse(BaseModel):
+    tool_call_id: str
+    status: str
+    message: str
+    conversation_status: str
 
 
 class FeedbackRequest(BaseModel):

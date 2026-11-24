@@ -24,7 +24,12 @@ class Settings(BaseSettings):
     rag_strong_vector: float = 0.85
     rag_top_k: int = 4
     chat_history_messages: int = 6
-
+    mock_jira_url: str = "http://localhost:8010"
+    n8n_webhook_url: str = ""
+    webhook_secret: str = ""
+    tool_confirm_minutes: int = 10
+    reset_limit_per_day: int = 3
+    
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

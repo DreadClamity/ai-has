@@ -6,8 +6,9 @@ from typing import Dict, List, Optional
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app.rag.hybrid import RetrievedChunk, hybrid_retrieve
-from app.rag.prompts import ALLOWED_INTENTS, SYSTEM_PROMPT, USER_TEMPLATE
-from app.services.llm import invoke_with_retry, message_text
+from app.rag.prompts import ALLOWED_INTENTS, SYSTEM_PROMPT, TOOL_RULES, USER_TEMPLATE
+from app.services.llm import invoke_with_tools, message_text
+from app.tools.registry import TOOL_DECLARATIONS, TOOLS
 
 GREETING = re.compile(
     r"^(hi|hello|hey|good (morning|afternoon|evening))[\s!.]*$", re.IGNORECASE
@@ -18,6 +19,9 @@ HUMAN_REQUEST = re.compile(
     r"(speak|talk) to (an? )?(agent|person|someone))\b",
     re.IGNORECASE,
 )
+ACTION_HINT = re.compile(
+    r"\b(ticket|incident|unlock|reset|escalat\w*|status|follow[- ]?up)\b", re.IGNORECASE
+)
 
 GREETING_REPLY = (
     "Hi! I'm the IT helpdesk assistant. Tell me what's going on, for example a "
@@ -27,11 +31,17 @@ THANKS_REPLY = (
     "You're welcome! If your issue is solved you can mark the conversation as "
     "resolved, or tell me what else you need."
 )
-HUMAN_REPLY = "Understood. A human IT agent is the right choice for this."
 FALLBACK_REPLY = (
     "I couldn't find a reliable answer to that in our IT knowledge base, so I "
     "don't want to guess. A human IT agent can help you with this."
 )
+
+TOOL_INTENTS = {
+    "reset_password": "password_reset",
+    "create_ticket": "ticket_request",
+    "escalate_to_agent": "human_request",
+    "get_ticket_status": "ticket_status",
+}
 
 
 @dataclass
@@ -58,6 +68,7 @@ class PipelineResult:
     prompt_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None
     events: List[dict] = field(default_factory=list)
+    tool_request: Optional[dict] = None
 
 
 def parse_llm_json(raw: str) -> Optional[dict]:
@@ -73,10 +84,14 @@ def parse_llm_json(raw: str) -> Optional[dict]:
 
 
 def build_messages(question: str, history: List[Dict[str, str]], chunks: List[RetrievedChunk]):
-    context = "\n\n".join(
-        f"[{i}] ({c.title} > {c.section})\n{c.text}" for i, c in enumerate(chunks, start=1)
-    )
-    messages = [SystemMessage(content=SYSTEM_PROMPT)]
+    if chunks:
+        context = "\n\n".join(
+            f"[{i}] ({c.title} > {c.section})\n{c.text}" for i, c in enumerate(chunks, start=1)
+        )
+    else:
+        context = "(no relevant knowledge base content was found for this question)"
+
+    messages = [SystemMessage(content=SYSTEM_PROMPT + "\n\n" + TOOL_RULES)]
     for turn in history:
         if turn["role"] == "user":
             messages.append(HumanMessage(content=turn["content"]))
@@ -116,10 +131,20 @@ def answer_question(question: str, history: List[Dict[str, str]]) -> PipelineRes
     if THANKS.match(text_in):
         return PipelineResult(THANKS_REPLY, "smalltalk", False, False)
     if HUMAN_REQUEST.search(text_in):
-        return PipelineResult(HUMAN_REPLY, "human_request", False, True)
+        return PipelineResult(
+            "",
+            "human_request",
+            False,
+            False,
+            tool_request={
+                "name": "escalate_to_agent",
+                "args": {"reason": "User asked to speak with a human agent"},
+                "user_initiated": True,
+            },
+        )
 
     retrieval = hybrid_retrieve(text_in)
-    if not retrieval.confident:
+    if not retrieval.confident and not ACTION_HINT.search(text_in):
         return _refusal(
             "refused_low_confidence",
             "out_of_scope",
@@ -127,38 +152,84 @@ def answer_question(question: str, history: List[Dict[str, str]]) -> PipelineRes
             retrieval.keyword_hit,
         )
 
-    response = invoke_with_retry(build_messages(text_in, history, retrieval.chunks))
+    chunks = retrieval.chunks if retrieval.confident else []
+    response = invoke_with_tools(build_messages(text_in, history, chunks), TOOL_DECLARATIONS)
     usage = getattr(response, "usage_metadata", None) or {}
     prompt_tokens = usage.get("input_tokens")
     completion_tokens = usage.get("output_tokens")
 
-    data = parse_llm_json(message_text(response.content))
-    if data is None:
-        result = _refusal(
-            "llm_output_invalid", "out_of_scope", retrieval.top_vector, retrieval.keyword_hit
-        )
+    def finish(result: PipelineResult) -> PipelineResult:
         result.prompt_tokens, result.completion_tokens = prompt_tokens, completion_tokens
         return result
+
+    tool_calls = getattr(response, "tool_calls", None) or []
+    if tool_calls:
+        call = tool_calls[0]
+        name = call.get("name")
+        if name in TOOLS:
+            return finish(
+                PipelineResult(
+                    answer="",
+                    intent=TOOL_INTENTS.get(name, "general_howto"),
+                    grounded=False,
+                    suggest_escalation=False,
+                    top_vector=retrieval.top_vector,
+                    keyword_hit=retrieval.keyword_hit,
+                    tool_request={"name": name, "args": dict(call.get("args") or {})},
+                )
+            )
+        return finish(
+            _refusal(
+                "unknown_tool_requested",
+                "out_of_scope",
+                retrieval.top_vector,
+                retrieval.keyword_hit,
+                extra={"tool": name},
+            )
+        )
+
+    data = parse_llm_json(message_text(response.content))
+    if data is None:
+        return finish(
+            _refusal(
+                "llm_output_invalid",
+                "out_of_scope",
+                retrieval.top_vector,
+                retrieval.keyword_hit,
+            )
+        )
 
     intent = data.get("intent") if data.get("intent") in ALLOWED_INTENTS else "general_howto"
     answer = str(data.get("answer") or "").strip()
     answerable = bool(data.get("answerable"))
     needs_human = bool(data.get("needs_human"))
 
+    if bool(data.get("clarify")) and answer and "?" in answer:
+        return finish(
+            PipelineResult(
+                answer,
+                intent,
+                False,
+                False,
+                top_vector=retrieval.top_vector,
+                keyword_hit=retrieval.keyword_hit,
+            )
+        )
+
     cited_numbers: List[int] = []
     for n in data.get("sources_used") or []:
-        if isinstance(n, int) and 1 <= n <= len(retrieval.chunks) and n not in cited_numbers:
+        if isinstance(n, int) and 1 <= n <= len(chunks) and n not in cited_numbers:
             cited_numbers.append(n)
 
     if not answerable or not answer:
-        result = _refusal(
-            "refused_llm_not_answerable",
-            intent if intent != "general_howto" else "out_of_scope",
-            retrieval.top_vector,
-            retrieval.keyword_hit,
+        return finish(
+            _refusal(
+                "refused_llm_not_answerable",
+                intent if intent != "general_howto" else "out_of_scope",
+                retrieval.top_vector,
+                retrieval.keyword_hit,
+            )
         )
-        result.prompt_tokens, result.completion_tokens = prompt_tokens, completion_tokens
-        return result
 
     if not cited_numbers:
         result = _refusal(
@@ -169,12 +240,11 @@ def answer_question(question: str, history: List[Dict[str, str]]) -> PipelineRes
             extra={"discarded_answer_preview": answer[:200]},
         )
         result.events[0]["severity"] = "medium"
-        result.prompt_tokens, result.completion_tokens = prompt_tokens, completion_tokens
-        return result
+        return finish(result)
 
     citations = []
     for n in cited_numbers:
-        chunk = retrieval.chunks[n - 1]
+        chunk = chunks[n - 1]
         citations.append(
             Citation(
                 index=n,
@@ -188,14 +258,14 @@ def answer_question(question: str, history: List[Dict[str, str]]) -> PipelineRes
             )
         )
 
-    return PipelineResult(
-        answer=answer,
-        intent=intent,
-        grounded=True,
-        suggest_escalation=needs_human,
-        citations=citations,
-        top_vector=retrieval.top_vector,
-        keyword_hit=retrieval.keyword_hit,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
+    return finish(
+        PipelineResult(
+            answer=answer,
+            intent=intent,
+            grounded=True,
+            suggest_escalation=needs_human,
+            citations=citations,
+            top_vector=retrieval.top_vector,
+            keyword_hit=retrieval.keyword_hit,
+        )
     )

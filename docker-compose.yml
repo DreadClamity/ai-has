@@ -40,6 +40,8 @@ services:
       CHROMA_HOST: chroma
       CHROMA_PORT: "8000"
       WATCHFILES_FORCE_POLLING: "true"
+      MOCK_JIRA_URL: http://mock-jira:8010
+      N8N_WEBHOOK_URL: http://mock-jira:8010/hooks/aihas
     ports:
       - "${BACKEND_PORT}:8000"
     volumes:
@@ -50,3 +52,10 @@ services:
         condition: service_healthy
       chroma:
         condition: service_started
+        
+  mock-jira:
+    build: ./automation/mock_jira
+    container_name: aihas-mock-jira
+    restart: unless-stopped
+    ports:
+      - "8010:8010"
