@@ -34,6 +34,12 @@ services:
     build: ./backend
     container_name: aihas-backend
     restart: unless-stopped
+    # Create missing demo accounts before serving this local capstone stack.
+    # The seed script preserves accounts that already exist.
+    command:
+      - /bin/sh
+      - -c
+      - python -m app.migrate && python -m app.seed && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     env_file: .env
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
