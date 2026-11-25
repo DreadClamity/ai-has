@@ -1,279 +1,283 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { useEffect, useState } from "react";
 import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Legend,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
+  Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer,
+  Tooltip, XAxis, YAxis,
 } from "recharts";
 import Header from "../../components/Header";
 import { useRequireRole } from "../../lib/auth";
 import { api } from "../../lib/api";
 
-const fmt = (value, suffix = "") => (value === null || value === undefined ? "-" : `${value}${suffix}`);
+const SECTIONS = ["Overview", "Knowledge base", "Activity"];
+const FRIENDLY_NAMES = {
+  login_rate_limited: "Repeated login attempts",
+  refused_low_confidence: "Insufficient source evidence",
+  escalate_to_agent: "Human handoff",
+  pii_redacted: "Personal information removed",
+  injection_blocked: "Unsafe instruction blocked",
+  out_of_scope: "Outside helpdesk scope",
+  success: "Completed",
+};
 
-function Kpi({ label, value, hint }) {
+function readable(value) {
+  if (FRIENDLY_NAMES[value]) return FRIENDLY_NAMES[value];
+  return String(value || "Unknown").replaceAll("_", " ").replace(/^./, (letter) => letter.toUpperCase());
+}
+
+function format(value, suffix = "") {
+  return value == null ? "No data" : `${Number(value).toLocaleString()}${suffix}`;
+}
+
+function seconds(ms) {
+  return format(ms == null ? null : Math.round(ms / 100) / 10, " s");
+}
+
+function Kpi({ label, value, detail }) {
   return (
-    <div className="card kpi" title={hint}>
-      <div className="muted small">{label}</div>
-      <div className="value">{value}</div>
+    <div className="card kpi">
+      <span className="muted">{label}</span>
+      <strong>{value}</strong>
+      {detail && <span className="muted small">{detail}</span>}
     </div>
   );
 }
 
 function ChartCard({ title, children }) {
   return (
-    <div className="card">
-      <h4>{title}</h4>
-      <div style={{ width: "100%", height: 220 }}>
-        <ResponsiveContainer>{children}</ResponsiveContainer>
+    <section className="card chart-card">
+      <h3>{title}</h3>
+      <div className="chart-area">
+        <ResponsiveContainer minWidth={0}>{children}</ResponsiveContainer>
       </div>
+    </section>
+  );
+}
+
+function DataTable({ headings, rows, empty = "No activity in this period." }) {
+  return (
+    <div className="table-wrap">
+      <table className="table">
+        <thead><tr>{headings.map((heading) => <th scope="col" key={heading}>{heading}</th>)}</tr></thead>
+        <tbody>
+          {rows.map(({ key, cells }) => <tr key={key}>{cells.map((cell, index) => <td key={headings[index]}>{cell}</td>)}</tr>)}
+          {rows.length === 0 && <tr><td colSpan={headings.length} className="muted">{empty}</td></tr>}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function Overview({ data }) {
+  const summary = data.summary;
+  const daily = data.daily.map((day) => ({
+    ...day,
+    label: day.day.slice(5),
+    avg_seconds: day.avg_latency_ms == null ? null : day.avg_latency_ms / 1000,
+    p95_seconds: day.p95_latency_ms == null ? null : day.p95_latency_ms / 1000,
+  }));
+  const feedbackCount = summary.feedback_up + summary.feedback_down;
+  const satisfaction = feedbackCount ? Math.round(100 * summary.feedback_up / feedbackCount) : null;
+  const axis = { fill: "var(--muted)", fontSize: 12 };
+  const tooltip = { backgroundColor: "var(--card)", color: "var(--text)", borderColor: "var(--border)", borderRadius: 8 };
+
+  return (
+    <>
+      <div className="kpis">
+        <Kpi label="Conversations" value={format(summary.total_conversations)} detail="All conversations in this period" />
+        <Kpi label="Resolved by AI" value={format(summary.resolved_by_ai)} detail={summary.deflection_rate_pct == null ? "No conversations in this period" : `${format(summary.deflection_rate_pct, "%")} of conversations`} />
+        <Kpi label="No outcome yet" value={format(summary.no_outcome)} detail="Conversations without a resolution or handoff" />
+      </div>
+      <div className="grid2">
+        <section className="card">
+          <div className="row-between"><h2>Conversation outcomes</h2><Link className="btn" href="/agent">View ticket queue</Link></div>
+          <dl className="stat-list">
+            <div><dt>Resolved by AI</dt><dd>{format(summary.resolved_by_ai)}</dd></div>
+            <div><dt>Handed to the service desk</dt><dd>{format(summary.escalated)}</dd></div>
+            <div><dt>No outcome yet</dt><dd>{format(summary.no_outcome)}</dd></div>
+            <div><dt>Open tickets now</dt><dd>{format(summary.open_backlog)}</dd></div>
+            <div><dt>Tickets resolved in this period</dt><dd>{format(summary.tickets_resolved)}</dd></div>
+          </dl>
+        </section>
+        <section className="card">
+          <h2>Service performance</h2>
+          <dl className="stat-list">
+            <div><dt>Average AI response time</dt><dd>{seconds(summary.avg_latency_ms)}</dd></div>
+            <div><dt>95% of AI responses took at most</dt><dd>{seconds(summary.p95_latency_ms)}</dd></div>
+            <div><dt>Average ticket resolution time</dt><dd>{format(summary.mttr_minutes, " min")}</dd></div>
+            <div><dt>Positive feedback</dt><dd>{format(satisfaction, "%")}</dd></div>
+          </dl>
+        </section>
+      </div>
+      <div className="grid2">
+        <ChartCard title="Conversations per day">
+          <BarChart data={daily} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+            <CartesianGrid stroke="var(--border)" vertical={false} />
+            <XAxis dataKey="label" tick={axis} minTickGap={22} />
+            <YAxis width={36} allowDecimals={false} tick={axis} />
+            <Tooltip contentStyle={tooltip} itemStyle={{ color: "var(--text)" }} />
+            <Legend />
+            <Bar dataKey="resolved_by_ai" stackId="outcomes" fill="var(--chart-green)" name="Resolved by AI" />
+            <Bar dataKey="escalated" stackId="outcomes" fill="var(--chart-blue)" name="Handed to service desk" />
+            <Bar dataKey="no_outcome" stackId="outcomes" fill="var(--chart-neutral)" name="No outcome yet" />
+          </BarChart>
+        </ChartCard>
+        <ChartCard title="AI resolution rate (%)">
+          <LineChart data={daily}>
+            <CartesianGrid stroke="var(--border)" vertical={false} />
+            <XAxis dataKey="label" tick={axis} minTickGap={22} />
+            <YAxis width={42} domain={[0, 100]} tick={axis} />
+            <Tooltip contentStyle={tooltip} itemStyle={{ color: "var(--text)" }} />
+            <Line dataKey="deflection_rate_pct" stroke="var(--chart-blue)" name="AI resolution rate (%)" />
+          </LineChart>
+        </ChartCard>
+        <ChartCard title="AI response time (seconds)">
+          <LineChart data={daily}>
+            <CartesianGrid stroke="var(--border)" vertical={false} />
+            <XAxis dataKey="label" tick={axis} minTickGap={22} />
+            <YAxis width={42} tick={axis} />
+            <Tooltip contentStyle={tooltip} itemStyle={{ color: "var(--text)" }} />
+            <Legend />
+            <Line dataKey="avg_seconds" stroke="var(--chart-blue)" name="Average" />
+            <Line dataKey="p95_seconds" stroke="var(--chart-amber)" name="95th percentile" />
+          </LineChart>
+        </ChartCard>
+        <ChartCard title="Average ticket resolution time (minutes)">
+          <BarChart data={daily}>
+            <CartesianGrid stroke="var(--border)" vertical={false} />
+            <XAxis dataKey="label" tick={axis} minTickGap={22} />
+            <YAxis width={42} tick={axis} />
+            <Tooltip contentStyle={tooltip} itemStyle={{ color: "var(--text)" }} />
+            <Bar dataKey="mttr_minutes" fill="var(--chart-blue)" name="Resolution time (min)" />
+          </BarChart>
+        </ChartCard>
+      </div>
+    </>
+  );
+}
+
+function Activity({ data }) {
+  return (
+    <div className="grid2">
+      <section className="card">
+        <h2>Protection events</h2>
+        <DataTable headings={["Event", "Severity", "Count"]} rows={data.guardrails.map((event) => ({
+          key: `${event.event_type}-${event.severity}`,
+          cells: [readable(event.event_type), <span className={`badge ${event.severity}`}>{readable(event.severity)}</span>, event.count],
+        }))} />
+      </section>
+      <section className="card">
+        <h2>Automation results</h2>
+        <DataTable headings={["Action", "Status", "Count", "Avg. time"]} rows={data.tools.map((tool) => ({
+          key: `${tool.tool_name}-${tool.status}`,
+          cells: [readable(tool.tool_name), readable(tool.status), tool.count, format(tool.avg_ms, " ms")],
+        }))} />
+      </section>
+      <section className="card">
+        <h2>Reply topics</h2>
+        <DataTable headings={["Topic", "Replies"]} rows={data.intents.map((item) => ({
+          key: item.intent,
+          cells: [readable(item.intent), item.count],
+        }))} />
+      </section>
     </div>
   );
 }
 
 export default function AdminPage() {
   const user = useRequireRole(["admin"]);
+  const [section, setSection] = useState("Overview");
   const [days, setDays] = useState(14);
   const [data, setData] = useState(null);
-  const [docs, setDocs] = useState([]);
+  const [docs, setDocs] = useState(null);
+  const [reindexing, setReindexing] = useState(false);
   const [reindexMsg, setReindexMsg] = useState("");
-  const [error, setError] = useState("");
-
-  const load = useCallback(async () => {
-    try {
-      setData(await api(`/metrics/dashboard?days=${days}`));
-      setDocs(await api("/kb/documents"));
-    } catch (e) {
-      setError(e.message);
-    }
-  }, [days]);
+  const [docsError, setDocsError] = useState("");
+  const [metricsError, setMetricsError] = useState("");
 
   useEffect(() => {
-    if (user) load();
-  }, [user, load]);
+    if (!user) return;
+    let obsolete = false;
+    api(`/metrics/dashboard?days=${days}`)
+      .then((result) => { if (!obsolete) setData(result); })
+      .catch((error) => { if (!obsolete) setMetricsError(error.message); });
+    return () => { obsolete = true; };
+  }, [user, days]);
 
-  const reindex = async () => {
-    setReindexMsg("Re-indexing...");
+  useEffect(() => {
+    if (!user) return;
+    let obsolete = false;
+    api("/kb/documents")
+      .then((result) => { if (!obsolete) setDocs(result); })
+      .catch((error) => { if (!obsolete) setDocsError(error.message); });
+    return () => { obsolete = true; };
+  }, [user]);
+
+  async function reindex() {
+    setReindexing(true);
+    setReindexMsg("");
+    setDocsError("");
     try {
-      const r = await api("/kb/reindex", { method: "POST" });
-      setReindexMsg(
-        `Done: ${r.added} added, ${r.updated} updated, ${r.skipped} unchanged, ${r.chunks_added} chunks embedded`
-      );
-      load();
-    } catch (e) {
-      setReindexMsg(e.message);
+      const result = await api("/kb/reindex", { method: "POST" });
+      setReindexMsg(`Index refreshed. ${result.added} added, ${result.updated} updated, ${result.skipped} unchanged, ${result.chunks_added} sections indexed.`);
+      setDocs(await api("/kb/documents"));
+    } catch (error) {
+      setDocsError(error.message);
+    } finally {
+      setReindexing(false);
     }
-  };
+  }
 
-  if (!user) return <p style={{ padding: 24 }}>Loading...</p>;
-
-  const s = data ? data.summary : null;
-  const daily = data ? data.daily.map((d) => ({ ...d, label: d.day.slice(5) })) : [];
-  const satisfaction =
-    s && s.feedback_up + s.feedback_down > 0
-      ? Math.round((100 * s.feedback_up) / (s.feedback_up + s.feedback_down))
-      : null;
+  if (!user) return <p className="loading" role="status">Loading your workspace…</p>;
 
   return (
     <>
       <Header user={user} />
-      <div className="container">
-        <div className="row-between">
-          <h2>Operations dashboard</h2>
-          <select value={days} onChange={(e) => setDays(Number(e.target.value))}>
-            <option value={7}>Last 7 days</option>
-            <option value={14}>Last 14 days</option>
-            <option value={30}>Last 30 days</option>
-          </select>
+      <main className="container">
+        <div className="row-between page-heading">
+          <div>
+            <h1>Operations dashboard</h1>
+            <p className="muted">Track support outcomes, manage documents, and review activity.</p>
+          </div>
+          {section !== "Knowledge base" && (
+            <label className="period-select">
+              Date range
+              <select value={days} onChange={(event) => { setMetricsError(""); setData(null); setDays(Number(event.target.value)); }}>
+                {[7, 14, 30].map((value) => <option key={value} value={value}>Last {value} days</option>)}
+              </select>
+            </label>
+          )}
         </div>
-        {error && <div className="error">{error}</div>}
+        <nav className="section-nav" aria-label="Dashboard sections">
+          {SECTIONS.map((name) => <button key={name} className="btn" aria-pressed={section === name} onClick={() => setSection(name)}>{name}</button>)}
+        </nav>
 
-        {s && (
+        {section !== "Knowledge base" ? (
           <>
-            <div className="kpis">
-              <Kpi label="Conversations" value={fmt(s.total_conversations)} />
-              <Kpi
-                label="Ticket deflection"
-                value={fmt(s.deflection_rate_pct, "%")}
-                hint="Share of conversations the user marked as resolved by the assistant"
-              />
-              <Kpi label="No outcome yet" value={fmt(s.no_outcome)} hint="Conversations still open or left without the user confirming resolution" />
-              <Kpi label="Avg latency" value={fmt(s.avg_latency_ms, " ms")} />
-              <Kpi label="P95 latency" value={fmt(s.p95_latency_ms, " ms")} />
-              <Kpi label="MTTR" value={fmt(s.mttr_minutes, " min")} hint="Mean time to resolution of tickets" />
-              <Kpi label="Open backlog" value={fmt(s.open_backlog)} />
-              <Kpi label="Tickets resolved" value={fmt(s.tickets_resolved)} />
-              <Kpi label="User satisfaction" value={fmt(satisfaction, "%")} hint="Thumbs up share" />
-            </div>
-
-            <div className="grid2">
-              <ChartCard title="Conversations per day">
-                <BarChart data={daily}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="label" />
-                  <YAxis allowDecimals={false} />
-                  <Tooltip />
-                  <Legend />
-                  <Bar dataKey="resolved_by_ai" stackId="a" fill="#12805c" name="Resolved by AI" />
-                  <Bar dataKey="escalated" stackId="a" fill="#d92d20" name="Human handled" />
-                </BarChart>
-              </ChartCard>
-
-              <ChartCard title="Deflection rate (%)">
-                <LineChart data={daily}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="label" />
-                  <YAxis domain={[0, 100]} />
-                  <Tooltip />
-                  <Line type="monotone" dataKey="deflection_rate_pct" stroke="#2f5bea" name="Deflection %" connectNulls />
-                </LineChart>
-              </ChartCard>
-
-              <ChartCard title="Response latency (ms)">
-                <LineChart data={daily}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="label" />
-                  <YAxis />
-                  <Tooltip />
-                  <Legend />
-                  <Line type="monotone" dataKey="avg_latency_ms" stroke="#2f5bea" name="Average" connectNulls />
-                  <Line type="monotone" dataKey="p95_latency_ms" stroke="#b54708" name="P95" connectNulls />
-                </LineChart>
-              </ChartCard>
-
-              <ChartCard title="MTTR (minutes)">
-                <BarChart data={daily}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="label" />
-                  <YAxis />
-                  <Tooltip />
-                  <Bar dataKey="mttr_minutes" fill="#7a5af8" name="MTTR (min)" />
-                </BarChart>
-              </ChartCard>
-            </div>
-
-            <div className="grid2">
-              <div className="card">
-                <h4>Guardrail events</h4>
-                <table className="table">
-                  <thead>
-                    <tr>
-                      <th>Event</th>
-                      <th>Severity</th>
-                      <th>Count</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.guardrails.map((g, i) => (
-                      <tr key={i}>
-                        <td>{g.event_type}</td>
-                        <td>
-                          <span className={`badge ${g.severity}`}>{g.severity}</span>
-                        </td>
-                        <td>{g.count}</td>
-                      </tr>
-                    ))}
-                    {data.guardrails.length === 0 && (
-                      <tr>
-                        <td colSpan={3} className="muted">
-                          None in this period
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-
-              <div className="card">
-                <h4>Automation (tool calls)</h4>
-                <table className="table">
-                  <thead>
-                    <tr>
-                      <th>Tool</th>
-                      <th>Status</th>
-                      <th>Count</th>
-                      <th>Avg ms</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.tools.map((t, i) => (
-                      <tr key={i}>
-                        <td>{t.tool_name}</td>
-                        <td>{t.status.replace("_", " ")}</td>
-                        <td>{t.count}</td>
-                        <td>{fmt(t.avg_ms)}</td>
-                      </tr>
-                    ))}
-                    {data.tools.length === 0 && (
-                      <tr>
-                        <td colSpan={4} className="muted">
-                          None in this period
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-
-              <div className="card">
-                <h4>Intent mix</h4>
-                <table className="table">
-                  <thead>
-                    <tr>
-                      <th>Intent</th>
-                      <th>Replies</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.intents.map((i) => (
-                      <tr key={i.intent}>
-                        <td>{i.intent}</td>
-                        <td>{i.count}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-
-              <div className="card">
-                <div className="row-between">
-                  <h4>Knowledge base</h4>
-                  <button className="btn btn-primary" onClick={reindex}>
-                    Re-index
-                  </button>
-                </div>
-                {reindexMsg && <p className="muted small">{reindexMsg}</p>}
-                <table className="table">
-                  <thead>
-                    <tr>
-                      <th>Document</th>
-                      <th>Category</th>
-                      <th>Chunks</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {docs.map((d) => (
-                      <tr key={d.id}>
-                        <td>{d.title}</td>
-                        <td>{d.category}</td>
-                        <td>{d.chunk_count}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+            {metricsError && <p className="error" role="alert">{metricsError}</p>}
+            {!data && !metricsError && <p className="muted" role="status">Loading dashboard…</p>}
+            {data && (section === "Overview" ? <Overview data={data} /> : <Activity data={data} />)}
           </>
+        ) : (
+          <section className="card">
+            <div className="row-between">
+              <div>
+                <h2>Support documents</h2>
+                {docs && <p className="muted">{docs.length} documents · {docs.reduce((total, doc) => total + doc.chunk_count, 0)} searchable sections</p>}
+              </div>
+              <button className="btn btn-primary" onClick={reindex} disabled={reindexing}>{reindexing ? "Refreshing…" : "Refresh search index"}</button>
+            </div>
+            {reindexMsg && <p className="banner ok" role="status">{reindexMsg}</p>}
+            {docsError && <p className="error" role="alert">{docsError}</p>}
+            {!docs && !docsError && <p className="muted" role="status">Loading documents…</p>}
+            {docs && <DataTable headings={["Document", "Category", "Sections"]} empty="No documents have been indexed." rows={docs.map((doc) => ({
+              key: doc.id,
+              cells: [doc.title, doc.category, doc.chunk_count],
+            }))} />}
+          </section>
         )}
-      </div>
+      </main>
     </>
   );
 }

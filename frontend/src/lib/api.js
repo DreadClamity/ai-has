@@ -49,7 +49,7 @@ export async function api(path, { method = "GET", body, form } = {}) {
   return data;
 }
 
-export async function streamChat(body, { onMeta, onToken, onDone }) {
+export async function streamChat(body, { onMeta, onToken, onDone, signal }) {
   const res = await fetch(`${API_URL}/chat/message/stream`, {
     method: "POST",
     headers: {
@@ -57,6 +57,7 @@ export async function streamChat(body, { onMeta, onToken, onDone }) {
       Authorization: `Bearer ${getToken()}`,
     },
     body: JSON.stringify(body),
+    signal,
   });
 
   if (res.status === 401) {
@@ -90,7 +91,11 @@ export async function streamChat(body, { onMeta, onToken, onDone }) {
       const parsed = JSON.parse(data);
       if (event === "meta" && onMeta) onMeta(parsed);
       else if (event === "token" && onToken) onToken(parsed.text);
-      else if (event === "done" && onDone) onDone(parsed);
+      else if (event === "done") {
+        onDone?.(parsed);
+        return;
+      }
     }
   }
+  throw new Error("The reply was interrupted. Check your conversations before retrying.");
 }

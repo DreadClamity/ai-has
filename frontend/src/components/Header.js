@@ -1,17 +1,29 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { clearSession } from "../lib/api";
+import ThemeToggle from "./ThemeToggle";
 
 const LINKS = [
-  { href: "/chat", label: "Chat", roles: ["employee", "agent", "admin"] },
-  { href: "/agent", label: "Agent Queue", roles: ["agent", "admin"] },
-  { href: "/admin", label: "Admin Dashboard", roles: ["admin"] },
+  { href: "/chat", label: "Get help", roles: ["employee", "agent", "admin"] },
+  { href: "/agent", label: "Ticket queue", roles: ["agent", "admin"] },
+  { href: "/admin", label: "Admin dashboard", roles: ["admin"] },
 ];
+
+export function Brand() {
+  return (
+    <div className="brand">
+      <span className="brand-mark" aria-hidden="true">H</span>
+      <strong>AI-HAS</strong>
+      <span className="brand-caption">IT Helpdesk</span>
+    </div>
+  );
+}
 
 export default function Header({ user }) {
   const router = useRouter();
+  const pathname = usePathname();
 
   const logout = () => {
     clearSession();
@@ -20,22 +32,21 @@ export default function Header({ user }) {
 
   return (
     <header className="header">
-      <div className="brand">
-        AI-HAS <span>IT Helpdesk</span>
+      <div className="topbar">
+        <Brand />
+        <div className="who">
+          <span className="identity"><strong>{user.full_name}</strong><span className="badge">{user.role}</span></span>
+          <ThemeToggle />
+          <button className="btn" onClick={logout}>Sign out</button>
+        </div>
       </div>
-      <nav>
-        {LINKS.filter((l) => l.roles.includes(user.role)).map((l) => (
-          <Link key={l.href} href={l.href}>
-            {l.label}
+      <nav className="workspace-nav" aria-label="Workspace">
+        {LINKS.filter((link) => link.roles.includes(user.role)).map((link) => (
+          <Link key={link.href} href={link.href} aria-current={pathname === link.href ? "page" : undefined}>
+            {link.label}
           </Link>
         ))}
       </nav>
-      <div className="who">
-        {user.full_name} <span className="badge">{user.role}</span>
-        <button className="btn" onClick={logout}>
-          Log out
-        </button>
-      </div>
     </header>
   );
 }

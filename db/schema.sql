@@ -72,7 +72,8 @@ CREATE TABLE message_citations (
     kb_document_id  UUID REFERENCES kb_documents(id) ON DELETE SET NULL,
     chunk_id        VARCHAR(120),
     relevance_score REAL,
-    snippet         TEXT
+    snippet         TEXT,
+    source_details  JSONB
 );
 
 -- ============ TICKETS ============

@@ -4,6 +4,8 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, clearSession, setToken } from "../../lib/api";
 import { homeFor } from "../../lib/auth";
+import { Brand } from "../../components/Header";
+import ThemeToggle from "../../components/ThemeToggle";
 
 const DEMO_ACCOUNTS = [
   { label: "Employee", email: "employee@aihas.local", password: "Employee123!" },
@@ -17,6 +19,7 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
 
   const submit = async (e) => {
     e.preventDefault();
@@ -39,29 +42,40 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="login-wrap">
+    <>
+      <header className="header">
+        <div className="topbar"><Brand /><ThemeToggle /></div>
+      </header>
+      <main className="container login-wrap">
+      <section className="login-intro">
+        <h1>Get help with your IT issues</h1>
+        <p className="muted">Find answers from your IT knowledge base or pick up the conversation with the service desk.</p>
+      </section>
       <form className="card login-box" onSubmit={submit}>
-        <h2>AI-HAS IT Helpdesk</h2>
-        <p className="muted">Sign in to continue</p>
-        <label>Email</label>
-        <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required />
-        <label>Password</label>
-        <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" required />
-        {error && <div className="error">{error}</div>}
+        <h2>Sign in to your workspace</h2>
+        <label htmlFor="email">Work email</label>
+        <input id="email" value={email} onChange={(e) => setEmail(e.target.value)} type="email" autoComplete="username" required />
+        <label htmlFor="password">Password</label>
+        <input id="password" value={password} onChange={(e) => setPassword(e.target.value)} type={showPassword ? "text" : "password"} autoComplete="current-password" required />
+        <label className="checkbox"><input type="checkbox" checked={showPassword} onChange={(e) => setShowPassword(e.target.checked)} /> Show password</label>
+        {error && <div className="error" role="alert">{error}</div>}
         <button className="btn btn-primary" disabled={busy} type="submit">
           {busy ? "Signing in..." : "Sign in"}
         </button>
         <div className="demo">
-          <span className="muted">Demo accounts (capstone only):</span>
+          <p className="muted">Choose a demo account to fill the sign-in form.</p>
           <div className="demo-buttons">
             {DEMO_ACCOUNTS.map((a) => (
               <button
                 key={a.label}
                 type="button"
                 className="btn"
+                disabled={busy}
                 onClick={() => {
                   setEmail(a.email);
                   setPassword(a.password);
+                  setShowPassword(false);
+                  setError("");
                 }}
               >
                 {a.label}
@@ -70,6 +84,7 @@ export default function LoginPage() {
           </div>
         </div>
       </form>
-    </div>
+      </main>
+    </>
   );
 }

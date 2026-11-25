@@ -92,7 +92,9 @@ def dashboard(
             SELECT d::date AS day,
                    COALESCE(k.total_conversations, 0) AS total_conversations,
                    COALESCE(k.resolved_by_ai, 0) AS resolved_by_ai,
-                   COALESCE(k.escalated, 0) AS escalated,
+                   COALESCE(k.escalated, 0) + COALESCE(closed.total, 0) AS escalated,
+                   COALESCE(k.total_conversations - k.resolved_by_ai - k.escalated, 0)
+                       - COALESCE(closed.total, 0) AS no_outcome,
                    k.deflection_rate_pct,
                    l.avg_latency_ms,
                    l.p95_latency_ms,
@@ -103,6 +105,12 @@ def dashboard(
                      CURRENT_DATE,
                      INTERVAL '1 day') AS d
             LEFT JOIN v_kpi_deflection_daily k ON k.day = d::date
+            LEFT JOIN (
+                SELECT started_at::date AS day, COUNT(*) AS total
+                FROM conversations
+                WHERE status = 'closed'
+                GROUP BY started_at::date
+            ) closed ON closed.day = d::date
             LEFT JOIN v_kpi_latency_daily l ON l.day = d::date
             LEFT JOIN v_kpi_mttr_daily m ON m.day = d::date
             ORDER BY d

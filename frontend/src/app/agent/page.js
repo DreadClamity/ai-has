@@ -1,209 +1,238 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Header from "../../components/Header";
 import { useRequireRole } from "../../lib/auth";
 import { api } from "../../lib/api";
 
-const FILTERS = ["", "escalated", "open", "in_progress", "resolved"];
+const FILTERS = [
+  ["", "All statuses"],
+  ["escalated", "Escalated"],
+  ["open", "Open"],
+  ["in_progress", "In progress"],
+  ["resolved", "Resolved"],
+  ["closed", "Closed"],
+];
+
+const labelFor = (status) => FILTERS.find(([value]) => value === status)?.[1] || status;
 
 export default function AgentPage() {
   const user = useRequireRole(["agent", "admin"]);
-  const [tickets, setTickets] = useState([]);
+  const [tickets, setTickets] = useState(null);
   const [filter, setFilter] = useState("");
   const [selectedId, setSelectedId] = useState(null);
   const [detail, setDetail] = useState(null);
   const [reply, setReply] = useState("");
   const [note, setNote] = useState("");
-  const [error, setError] = useState("");
-
-  const loadTickets = useCallback(async () => {
-    try {
-      setTickets(await api(`/agent/tickets${filter ? `?status=${filter}` : ""}`));
-    } catch (e) {
-      setError(e.message);
-    }
-  }, [filter]);
-
-  const loadDetail = useCallback(async (id) => {
-    try {
-      setDetail(await api(`/agent/tickets/${id}`));
-    } catch (e) {
-      setError(e.message);
-    }
-  }, []);
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [version, setVersion] = useState(0);
+  const [queueError, setQueueError] = useState("");
+  const [detailError, setDetailError] = useState("");
+  const [actionError, setActionError] = useState("");
+  const [notice, setNotice] = useState("");
+  const detailRef = useRef(null);
+  const actionRef = useRef(false);
 
   useEffect(() => {
-    if (!user) return undefined;
-    loadTickets();
-    const timer = setInterval(loadTickets, 8000);
-    return () => clearInterval(timer);
-  }, [user, loadTickets]);
+    if (!user || busy) return;
+    let obsolete = false;
+    let loading = false;
+
+    async function load() {
+      if (loading) return;
+      loading = true;
+      try {
+        const rows = await api(`/agent/tickets${filter ? `?status=${filter}` : ""}`);
+        if (!obsolete) {
+          setTickets(rows);
+          setQueueError("");
+        }
+      } catch (error) {
+        if (!obsolete) setQueueError(error.message);
+      } finally {
+        loading = false;
+      }
+    }
+
+    load();
+    const timer = setInterval(load, 8000);
+    return () => { obsolete = true; clearInterval(timer); };
+  }, [user, filter, busy, version]);
 
   useEffect(() => {
-    if (!selectedId) return undefined;
-    loadDetail(selectedId);
-    const timer = setInterval(() => loadDetail(selectedId), 4000);
-    return () => clearInterval(timer);
-  }, [selectedId, loadDetail]);
+    if (!selectedId || busy) return;
+    let obsolete = false;
+    let loading = false;
 
-  const act = async (path, body) => {
-    try {
-      setError("");
-      await api(`/agent/tickets/${selectedId}/${path}`, { method: "POST", body });
-      await loadDetail(selectedId);
-      await loadTickets();
-    } catch (e) {
-      setError(e.message);
+    async function load() {
+      if (loading) return;
+      loading = true;
+      try {
+        const result = await api(`/agent/tickets/${selectedId}`);
+        if (!obsolete) {
+          setDetail(result);
+          setDetailError("");
+        }
+      } catch (error) {
+        if (!obsolete) setDetailError(error.message);
+      } finally {
+        loading = false;
+      }
     }
-  };
 
-  const sendReply = async () => {
-    if (!reply.trim()) return;
-    await act("reply", { content: reply.trim() });
+    load();
+    const timer = setInterval(load, 4000);
+    return () => { obsolete = true; clearInterval(timer); };
+  }, [selectedId, busy, version]);
+
+  function selectTicket(id) {
+    if (actionRef.current || id === selectedId) return;
+    setSelectedId(id);
+    setDetail(null);
     setReply("");
-  };
-
-  const resolveTicket = async () => {
-    await act("resolve", { note });
     setNote("");
-  };
+    setConfirming(false);
+    setActionError("");
+    setDetailError("");
+    setNotice("");
+    if (window.matchMedia("(max-width: 780px)").matches) detailRef.current?.focus();
+  }
 
-  if (!user) return <p style={{ padding: 24 }}>Loading...</p>;
+  async function act(path, body, onSuccess, successMessage) {
+    if (actionRef.current) return;
+    actionRef.current = true;
+    setBusy(true);
+    setActionError("");
+    setNotice("");
+    try {
+      await api(`/agent/tickets/${selectedId}/${path}`, { method: "POST", body });
+      onSuccess?.();
+      setNotice(successMessage);
+      try {
+        setDetail(await api(`/agent/tickets/${selectedId}`));
+      } catch (error) {
+        setDetailError(error.message);
+      }
+    } catch (error) {
+      setActionError(error.message);
+    } finally {
+      actionRef.current = false;
+      setBusy(false);
+      setVersion((previous) => previous + 1);
+    }
+  }
 
-  const ticket = detail ? detail.ticket : null;
+  function sendReply(event) {
+    event.preventDefault();
+    if (reply.trim()) {
+      act("reply", { content: reply.trim() }, () => setReply(""), "Reply sent.");
+    }
+  }
+
+  function resolveTicket(event) {
+    event.preventDefault();
+    act("resolve", { note: note.trim() }, () => {
+      setNote("");
+      setConfirming(false);
+    }, "Ticket resolved.");
+  }
+
+  if (!user) return <p className="loading" role="status">Loading your workspace…</p>;
+
+  const ticket = detail?.ticket;
   const canAct = ticket && (ticket.assignee_id === user.id || user.role === "admin");
-  const live = detail && detail.conversation_status === "escalated";
-  const finished = ticket && (ticket.status === "resolved" || ticket.status === "closed");
+  const live = detail?.conversation_status === "escalated";
+  const finished = ticket && ["resolved", "closed"].includes(ticket.status);
 
   return (
     <>
       <Header user={user} />
-      <div className="container">
-        {error && <div className="error">{error}</div>}
+      <main className="container">
+        <div className="page-heading">
+          <h1>Ticket queue</h1>
+          <p className="muted">Review requests, pick up tickets, and reply to employees.</p>
+        </div>
         <div className="agent-layout">
-          <section className="card">
-            <div className="row-between">
-              <h3>Ticket queue</h3>
-              <select value={filter} onChange={(e) => setFilter(e.target.value)}>
-                {FILTERS.map((f) => (
-                  <option key={f} value={f}>
-                    {f ? f.replace("_", " ") : "all statuses"}
-                  </option>
-                ))}
+          <section aria-label="Tickets">
+            <div className="row-between queue-filter">
+              <label htmlFor="status-filter">Filter by status</label>
+              <select id="status-filter" value={filter} disabled={busy} onChange={(event) => { setTickets(null); setFilter(event.target.value); }}>
+                {FILTERS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
             </div>
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Ticket</th>
-                  <th>Requester</th>
-                  <th>Priority</th>
-                  <th>Status</th>
-                  <th>Assignee</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tickets.map((t) => (
-                  <tr
-                    key={t.id}
-                    className={t.id === selectedId ? "row-selected" : "row-click"}
-                    onClick={() => setSelectedId(t.id)}
-                  >
-                    <td>
-                      <strong>{t.ticket_key}</strong>
-                      <div className="muted small">{t.title}</div>
-                    </td>
-                    <td>{t.requester_name}</td>
-                    <td>
-                      <span className={`badge ${t.priority}`}>{t.priority}</span>
-                    </td>
-                    <td>
-                      <span className={`badge ${t.status}`}>{t.status.replace("_", " ")}</span>
-                    </td>
-                    <td>{t.assignee_name || "-"}</td>
-                  </tr>
-                ))}
-                {tickets.length === 0 && (
-                  <tr>
-                    <td colSpan={5} className="muted">
-                      No tickets
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+            {queueError && <p className="error" role="alert">{queueError}</p>}
+            {!tickets && !queueError && <p className="muted" role="status">Loading tickets…</p>}
+            {tickets?.length === 0 && <p className="card muted">{filter ? "No tickets match this status." : "No tickets yet. New requests will appear here."}</p>}
+            <div className="ticket-list">
+              {tickets?.map((item) => (
+                <button key={item.id} className="card ticket-button" type="button" aria-current={item.id === selectedId ? "true" : undefined} disabled={busy} onClick={() => selectTicket(item.id)}>
+                  <span className="row-between">
+                    <span className="muted small">{item.ticket_key}</span>
+                    <span className={`badge ${item.priority}`}>{item.priority} priority</span>
+                  </span>
+                  <strong>{item.title}</strong>
+                  <span className="muted small">{item.requester_name} · {item.assignee_name || "Unassigned"}</span>
+                  <span className={`badge ${item.status}`}>{labelFor(item.status)}</span>
+                </button>
+              ))}
+            </div>
           </section>
 
-          <section className="card">
-            {!ticket && <p className="muted">Select a ticket to see the conversation.</p>}
+          <section className="card ticket-detail" aria-label="Ticket details" ref={detailRef} tabIndex={-1} aria-busy={busy}>
+            {detailError && <p className="error" role="alert">{detailError}</p>}
+            {!selectedId && <p className="muted">Select a ticket to read its conversation and see available actions.</p>}
+            {selectedId && !ticket && !detailError && <p className="muted" role="status">Loading ticket…</p>}
             {ticket && (
               <>
                 <div className="row-between">
-                  <h3>
-                    {ticket.ticket_key} {ticket.external_ref ? `(${ticket.external_ref})` : ""}
-                  </h3>
-                  <span className={`badge ${ticket.status}`}>{ticket.status.replace("_", " ")}</span>
+                  <p className="muted small">{ticket.ticket_key}{ticket.external_ref && ` · ${ticket.external_ref}`}</p>
+                  <span className={`badge ${ticket.status}`}>{labelFor(ticket.status)}</span>
                 </div>
-                <p>
-                  <strong>{ticket.title}</strong>
-                  <br />
-                  <span className="muted small">
-                    {ticket.requester_name} ({ticket.requester_email}) &middot; {ticket.category || "general"}
-                  </span>
-                </p>
-
+                <h2>{ticket.title}</h2>
+                <p className="muted">{ticket.requester_name} · {ticket.requester_email}</p>
+                <p className="muted small">{ticket.category || "General"} · {ticket.assignee_name || "Unassigned"}</p>
+                {ticket.description && ticket.description !== ticket.title && <p className="ticket-description">{ticket.description}</p>}
+                <h3>Conversation</h3>
                 <div className="transcript">
                   {detail.messages.length === 0 && <p className="muted">No conversation attached.</p>}
-                  {detail.messages.map((m) => (
-                    <div key={m.id} className={`msg small-msg ${m.role}`}>
-                      <div className="msg-role">
-                        {m.role === "user" ? ticket.requester_name : m.role === "agent" ? "IT Agent" : "AI Assistant"}
-                      </div>
-                      {m.content}
-                    </div>
+                  {detail.messages.map((message) => (
+                    <article className={`msg ${message.role}`} key={message.id}>
+                      <div className="msg-role">{message.role === "user" ? ticket.requester_name : message.role === "agent" ? "IT agent" : "AI assistant"}</div>
+                      <div className="message-content">{message.content}</div>
+                    </article>
                   ))}
                 </div>
-
-                <div className="actions">
-                  {ticket.assignee_id === null && !finished && (
-                    <button className="btn btn-primary" onClick={() => act("claim")}>
-                      Claim ticket
-                    </button>
-                  )}
-                </div>
-
-                {canAct && live && (
-                  <div className="composer">
-                    <textarea
-                      rows={2}
-                      value={reply}
-                      placeholder="Reply to the employee..."
-                      onChange={(e) => setReply(e.target.value)}
-                    />
-                    <button className="btn btn-primary" onClick={sendReply}>
-                      Send
-                    </button>
-                  </div>
+                {notice && <p className="banner ok" role="status">{notice}</p>}
+                {actionError && <p className="error" role="alert">{actionError}</p>}
+                {busy && <p className="muted small" role="status">Updating ticket…</p>}
+                {!ticket.assignee_id && !finished && (
+                  <button className="btn btn-primary" disabled={busy} onClick={() => act("claim", undefined, null, "Ticket assigned to you.")}>Assign to me</button>
                 )}
-
+                {canAct && live && (
+                  <form className="ticket-form" onSubmit={sendReply}>
+                    <label htmlFor="agent-reply">Reply to the employee</label>
+                    <textarea id="agent-reply" rows={3} maxLength={2000} value={reply} onChange={(event) => setReply(event.target.value)} disabled={busy} />
+                    <button className="btn btn-primary" type="submit" disabled={busy || !reply.trim()}>Send reply</button>
+                  </form>
+                )}
                 {canAct && !finished && ticket.assignee_id && (
-                  <div className="composer">
-                    <input
-                      value={note}
-                      placeholder="Resolution note (optional)"
-                      onChange={(e) => setNote(e.target.value)}
-                    />
-                    <button className="btn btn-danger" onClick={resolveTicket}>
-                      Resolve ticket
-                    </button>
-                  </div>
+                  confirming ? (
+                    <form className="ticket-form" onSubmit={resolveTicket}>
+                      <label htmlFor="resolution">Resolution summary (optional)</label>
+                      <input id="resolution" value={note} maxLength={500} onChange={(event) => setNote(event.target.value)} disabled={busy} autoFocus />
+                      <div className="actions">
+                        <button className="btn btn-primary" type="submit" disabled={busy}>Confirm resolution</button>
+                        <button className="btn" type="button" disabled={busy} onClick={() => setConfirming(false)}>Keep working</button>
+                      </div>
+                    </form>
+                  ) : <button className="btn resolve-ticket" disabled={busy} onClick={() => setConfirming(true)}>Resolve ticket</button>
                 )}
               </>
             )}
           </section>
         </div>
-      </div>
+      </main>
     </>
   );
 }

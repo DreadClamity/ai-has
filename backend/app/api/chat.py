@@ -5,6 +5,7 @@ import uuid
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
+from langchain_google_genai.embeddings import GoogleGenerativeAIError
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -194,11 +195,19 @@ def send_message(
 
         try:
             result = answer_question(message_text_in, history)
-        except LLMUnavailable:
+        except (LLMUnavailable, GoogleGenerativeAIError) as exc:
+            invalid_key = any(
+                marker in str(exc).lower()
+                for marker in ("api_key_invalid", "api key not valid", "api key expired")
+            )
             raise HTTPException(
                 status_code=503,
-                detail="The AI service is busy right now. Please try again in a moment or ask for a human agent.",
-            )
+                detail=(
+                    "The AI service rejected its API key. Please contact the administrator."
+                    if invalid_key else
+                    "The AI service is unavailable right now. Please try again in a moment or ask for a human agent."
+                ),
+            ) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 
@@ -239,11 +248,11 @@ def send_message(
             text(
                 """
                 INSERT INTO message_citations
-                    (message_id, kb_document_id, chunk_id, relevance_score, snippet)
+                    (message_id, kb_document_id, chunk_id, relevance_score, snippet, source_details)
                 VALUES
                     (CAST(:mid AS uuid),
                      (SELECT id FROM kb_documents WHERE id = CAST(:doc AS uuid)),
-                     :chunk, :score, :snippet)
+                     :chunk, :score, :snippet, CAST(:details AS jsonb))
                 """
             ),
             {
@@ -252,6 +261,12 @@ def send_message(
                 "chunk": citation.chunk_id,
                 "score": citation.relevance,
                 "snippet": citation.snippet,
+                "details": json.dumps({
+                    "index": citation.index,
+                    "title": citation.title,
+                    "section": citation.section,
+                    "source_filename": citation.source_filename,
+                }),
             },
         )
 
@@ -319,10 +334,17 @@ def list_conversations(
     rows = db.execute(
         text(
             """
-            SELECT id::text AS id, status::text AS status, started_at, resolved_at
-            FROM conversations
-            WHERE user_id = CAST(:uid AS uuid)
-            ORDER BY started_at DESC
+            SELECT c.id::text AS id, c.status::text AS status, c.started_at, c.resolved_at,
+                   (
+                       SELECT LEFT(regexp_replace(m.content, '[[:space:]]+', ' ', 'g'), 80)
+                       FROM messages m
+                       WHERE m.conversation_id = c.id AND m.role = 'user'
+                       ORDER BY m.created_at, m.id
+                       LIMIT 1
+                   ) AS title
+            FROM conversations c
+            WHERE c.user_id = CAST(:uid AS uuid)
+            ORDER BY c.started_at DESC, c.id
             LIMIT 50
             """
         ),
@@ -341,13 +363,42 @@ def list_messages(
     rows = db.execute(
         text(
             """
-            SELECT id::text AS id, role::text AS role, content, intent, created_at
-            FROM messages
-            WHERE conversation_id = CAST(:cid AS uuid)
-            ORDER BY created_at
+            SELECT m.id::text AS id, m.role::text AS role, m.content, m.intent, m.created_at,
+                   f.rating,
+                   (
+                       SELECT jsonb_build_object('tool_call_id', t.id, 'tool_name', t.tool_name, 'summary', m.content)
+                       FROM tool_calls t
+                       WHERE t.message_id = m.id
+                         AND t.conversation_id = m.conversation_id
+                         AND t.requires_confirmation
+                         AND t.status = 'pending_confirmation'
+                         AND t.created_at > NOW() - (:minutes * INTERVAL '1 minute')
+                       ORDER BY t.created_at DESC
+                       LIMIT 1
+                   ) AS pending,
+                   COALESCE((
+                       SELECT jsonb_agg(
+                           jsonb_build_object(
+                               'index', c.source_details->'index',
+                               'chunk_id', COALESCE(c.chunk_id, c.id::text),
+                               'title', COALESCE(c.source_details->>'title', d.title),
+                               'section', c.source_details->>'section',
+                               'source_filename', COALESCE(c.source_details->>'source_filename', d.source_filename),
+                               'relevance', c.relevance_score,
+                               'snippet', COALESCE(c.snippet, '')
+                           ) ORDER BY (c.source_details->>'index')::int NULLS LAST, c.id
+                       )
+                       FROM message_citations c
+                       LEFT JOIN kb_documents d ON d.id = c.kb_document_id
+                       WHERE c.message_id = m.id
+                   ), '[]'::jsonb) AS citations
+            FROM messages m
+            LEFT JOIN message_feedback f ON f.message_id = m.id AND f.user_id = CAST(:uid AS uuid)
+            WHERE m.conversation_id = CAST(:cid AS uuid)
+            ORDER BY m.created_at, m.id
             """
         ),
-        {"cid": conversation["id"]},
+        {"cid": conversation["id"], "uid": user["id"], "minutes": settings.tool_confirm_minutes},
     ).mappings().all()
     return [dict(r) for r in rows]
 

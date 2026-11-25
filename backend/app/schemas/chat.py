@@ -19,6 +19,10 @@ class CitationOut(BaseModel):
     snippet: str
 
 
+class SavedCitationOut(CitationOut):
+    index: Optional[int] = None
+
+
 class PendingAction(BaseModel):
     tool_call_id: str
     tool_name: str
@@ -67,6 +71,7 @@ class ConversationOut(BaseModel):
     status: str
     started_at: datetime
     resolved_at: Optional[datetime] = None
+    title: Optional[str] = None
 
 
 class MessageOut(BaseModel):
@@ -75,3 +80,6 @@ class MessageOut(BaseModel):
     content: str
     intent: Optional[str] = None
     created_at: datetime
+    citations: List[SavedCitationOut] = Field(default_factory=list)
+    rating: Optional[Literal[-1, 1]] = None
+    pending: Optional[PendingAction] = None
